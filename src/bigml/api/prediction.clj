@@ -1,4 +1,4 @@
-;; Copyright 2012, 2016 BigML
+;; Copyright 2012-2017 BigML
 ;; Licensed under the Apache License, Version 2.0
 ;; http://www.apache.org/licenses/LICENSE-2.0
 
@@ -77,6 +77,39 @@
 
 (def ^:private get-root (comp :root :model))
 
+(defn- truncate [v]
+  (let [lv (unchecked-long v)]
+    (if (== lv v)
+      lv
+      (let [f (Math/pow 10 5)
+            fv (* f v)]
+        (if (<= Long/MIN_VALUE fv Long/MAX_VALUE)
+          (let [rv (double (/ (Math/round fv) f))
+                lv (unchecked-long rv)]
+            (if (== lv rv) lv rv))
+          v)))))
+
+(defn- normalize [xs]
+  (let [sum (double (reduce + xs))]
+    (map (comp truncate #(/ % sum)) xs)))
+
+(defn- normalize-map [coll]
+  (zipmap (keys coll) (normalize (vals coll))))
+
+(defn- with-probs [pred model]
+  (if-let [root-counts (-> (get-root model)
+                           (:objective_summary)
+                           (:categories))]
+    (let [not-weighted? (not (:weighted_objective_summary (get-root model)))
+          root-dist (normalize-map (into {} root-counts))
+          {:keys [weighted_objective_summary objective_summary]} pred
+          obj-summ (or weighted_objective_summary objective_summary)
+          probs (->> (cond->> (into {} (:categories obj-summ))
+                       not-weighted? (merge-with + root-dist))
+                     (normalize-map))]
+      (assoc pred :probabilities probs))
+    pred))
+
 (defn predictor
   "Returns the model as a function for making predictions locally.
    The returned function expects either a map of inputs (field ids to
@@ -98,6 +131,7 @@
                      inputs)
             result (root-fn inputs)]
         (if details
-          (dissoc (assoc result :prediction {obj-field (:output result)})
-                  :output)
+          (-> (assoc result :prediction {obj-field (:output result)})
+              (dissoc :output)
+              (with-probs model))
           (:output result))))))
